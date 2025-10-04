@@ -19,6 +19,9 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
+      - name: Install xcpretty
+        run: sudo gem install xcpretty
+
       - name: Build project
         run: |
           xcodebuild \
