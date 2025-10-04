@@ -22,8 +22,8 @@ jobs:
       - name: Build project
         run: |
           xcodebuild \
-            -project YourProject.xcodeproj \   # or use -workspace YourApp.xcworkspace
-            -scheme YourSchemeName \
+            -project Action\ Demo.xcodeproj \   # or use -workspace YourApp.xcworkspace
+            -scheme Action\ Demo \
             -sdk iphonesimulator \
             -configuration Debug \
             build | xcpretty
