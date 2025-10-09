@@ -1,217 +1,115 @@
-name: 🚀 Deploy to TestFlight
+name: 🏗️ iOS Build & Deploy to App Store
 
 on:
-  workflow_dispatch: # Manual trigger (safe for testing)
-  # later you can add:
+  workflow_dispatch:   # manual trigger
   # push:
-  #   branches: [ main, release/* ]
+  #   branches: [develop, feature/*]  # optional trigger for testing
 
 jobs:
-  build-and-upload:
+  build:
     runs-on: macos-26
 
+    env:
+      KEYCHAIN_PASSWORD: temp_pass
+      CERT_P12_PASSWORD: ${{ secrets.DISTRIBUTION_CERT_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+
     steps:
+      # 1️⃣ Checkout source code
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Ruby
-        uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.3' # Specify the Ruby version you need
-          bundler-cache: true # Install gems from the Gemfile and cache them
+      # 2️⃣ Display Xcode version for debugging
+      - name: 🧰 Setup Xcode
+        run: xcodebuild -version
 
-      - name: Install Dependencies
+      # 3️⃣ Import signing certificate (.p12)
+      - name: 🔑 Import Distribution Certificate
         run: |
-          gem install jwt
+          echo "${{ secrets.DISTRIBUTION_CERT_P12 }}" | base64 --decode > distribution.p12
 
-      - name: 🔑 Generate App Store Connect JWT
-        id: generate_jwt
-        env:
-          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-          PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
-        run: |
-          token=$(ruby -rjwt -ropenssl -e "
-            private_key_obj = OpenSSL::PKey::EC.new(ENV['PRIVATE_KEY'])
-            token = JWT.encode(
-              {
-                iss: ENV['ISSUER_ID'],
-                exp: Time.now.to_i + 20 * 60,
-                aud: 'appstoreconnect-v1'
-              },
-              private_key_obj,
-              'ES256',
-              header_fields = { kid: ENV['KEY_ID'] }
-            )
-            puts token
-          ")
-          echo "TOKEN=$token" >> $GITHUB_ENV
-
-      - name: 🔐 Generate RSA Private Key and CSR
-        id: generate_csr
-        run: |
-          # Generate RSA private key (2048 bits)
-          openssl genpkey -algorithm RSA -out rsa_private.key -pkeyopt rsa_keygen_bits:2048
-
-          # Create a CSR (Certificate Signing Request)
-          openssl req -new -key rsa_private.key -out csr.certSigningRequest -subj "/CN=GitHubActionsBot, O=SearisAS, C=NO"
-
-          echo "✅ RSA private key and CSR generated successfully."
-
-          # Save CSR content to environment for next steps (API call)
-          CSR_CONTENT=$(cat csr.certSigningRequest | base64 | tr -d '\n')
-          echo "CSR_CONTENT=$CSR_CONTENT" >> $GITHUB_ENV
-
-      - name: 📄 Request and Save Distribution Certificate
-        env:
-          TOKEN: ${{ env.TOKEN }}
-          CSR_CONTENT: ${{ env.CSR_CONTENT }}
-        run: |
-          echo "📡 Requesting certificate from App Store Connect..."
-          response=$(curl -s -X POST "https://api.appstoreconnect.apple.com/v1/certificates" \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "data": {
-                "type": "certificates",
-                "attributes": {
-                  "certificateType": "DISTRIBUTION",
-                  "csrContent": "'"$CSR_CONTENT"'"
-                }
-              }
-            }')
-                
-          status=$(echo "$response" | jq -r '.errors[0].status // .data.id')
-          if [[ "$status" == null ]]; then
-            echo "❌ Failed to create distribution certificate"
-            echo "$response"
-            exit 1
-          fi
-                
-          cert_id=$(echo "$response" | jq -r '.data.id')
-          cert_serial=$(echo "$response" | jq -r '.data.attributes.serialNumber')
-          cert_content=$(echo "$response" | jq -r '.data.attributes.certificateContent')
-                
-          echo "✅ Certificate created:"
-          echo "ID: $cert_id"
-          echo "Serial: $cert_serial"
-                
-          # Save certificate content with proper PEM headers
-          {
-            echo "-----BEGIN CERTIFICATE-----"
-            echo "$cert_content"
-            echo "-----END CERTIFICATE-----"
-          } > distribution.cer
-                
-          echo "Certificate saved to distribution.cer"
-          echo "CERT_ID=$cert_id" >> $GITHUB_ENV
-
-      - name: 🔧 Convert Certificate to .p12 format
-        env:
-          CERT_P12_PASSWORD: ${{ secrets.CERT_P12_PASSWORD }} # store securely in GitHub Secrets
-        run: |
-          # Combine private key + certificate into a password-protected P12 file
-          openssl pkcs12 -export \
-            -inkey rsa_private.key \
-            -in distribution.cer \
-            -out distribution.p12 \
-            -password pass:$CERT_P12_PASSWORD
-        
-          echo "✅ distribution.p12 created successfully."
-      
-      - name: 📦 Upload .p12 as GitHub Actions artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: distribution-certificate
-          path: distribution.p12
-      
-      - name: 🔑 Import certificate to keychain
-        env:
-          KEYCHAIN_PASSWORD: temp_pass
-          CERT_P12_PASSWORD: ${{ secrets.CERT_P12_PASSWORD }}
-        run: |
-          # Create a temporary keychain
           security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-        
-          # Import the P12 file into the new keychain
           security import distribution.p12 \
             -k ~/Library/Keychains/build.keychain \
             -P "$CERT_P12_PASSWORD" \
             -T /usr/bin/codesign
-        
-          # Make this keychain the default for codesign and unlock it
+
           security list-keychains -s ~/Library/Keychains/build.keychain
           security default-keychain -s ~/Library/Keychains/build.keychain
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" ~/Library/Keychains/build.keychain
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" ~/Library/Keychains/build.keychain
-        
-          echo "🔓 Keychain imported and unlocked for code signing."
 
-      - name: 🧾 Create Distribution Provisioning Profile
-        env:
-          TOKEN: ${{ env.TOKEN }}
-          CERTIFICATE_ID: ${{ env.CERT_ID }}        # From previous step
-          BUNDLE_ID: ${{ secrets.APP_BUNDLE_ID }}   # Store your bundle ID as a secret
+          echo "✅ Certificate imported successfully."
+
+      # 4️⃣ Create App Store Connect API key file
+      - name: 🔑 Setup App Store Connect API Key
         run: |
-          echo "Creating Distribution Provisioning Profile..."
-        
-          PROFILE_NAME="MyApp Distribution Profile"
-        
-          response=$(curl -s -X POST "https://api.appstoreconnect.apple.com/v1/profiles" \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Content-Type: application/json" \
-            -d @- <<EOF
-            {
-              "data": {
-                "type": "profiles",
-                "attributes": {
-                  "name": "$PROFILE_NAME",
-                  "profileType": "IOS_APP_STORE"
-                },
-                "relationships": {
-                  "bundleId": {
-                    "data": {
-                      "type": "bundleIds",
-                      "id": "$BUNDLE_ID"
-                    }
-                  },
-                  "certificates": {
-                    "data": [
-                      {
-                        "type": "certificates",
-                        "id": "$CERTIFICATE_ID"
-                      }
-                    ]
-                  }
-                }
-              }
-            }
-            EOF
-            )
+          mkdir -p ~/private_keys
+          echo "$APP_STORE_CONNECT_PRIVATE_KEY" > ~/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8
+          echo "✅ App Store Connect API key created"
 
-          # Extract Base64-encoded profile content
-          profile_content=$(echo "$response" | jq -r '.data.attributes.profileContent')
-
-          if [ "$profile_content" == "null" ] || [ -z "$profile_content" ]; then
-            echo "❌ Failed to create provisioning profile."
-            echo "$response"
-            exit 1
-          fi
-
-          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          echo "$profile_content" | base64 --decode > ~/Library/MobileDevice/Provisioning\ Profiles/MyApp_Distribution_Profile.mobileprovision
-
-          echo "✅ Provisioning profile saved successfully."
-
-      - name: 🏗️ Build and Archive App
+      # 5️⃣ Build & archive (automatic provisioning via API key)
+      - name: 🏗️ Build and Archive
         run: |
           xcodebuild clean archive \
-            -project Action\ Demo.xcodeproj \
-            -scheme Action\ Demo \
+            -project "Action Demo.xcodeproj" \
+            -scheme "Action Demo" \
+            -sdk iphoneos \
             -configuration Release \
-            -derivedDataPath "ios/build/DerivedData" \
-            -archivePath $PWD/build/Action\ Demo.xcarchive \
+            -archivePath "$PWD/build/Action Demo.xcarchive" \
             -allowProvisioningUpdates \
-            DEVELOPMENT_TEAM=${{ secrets.APPLE_TEAM_ID }} \
-            CODE_SIGN_STYLE=Manual \
-            PROVISIONING_PROFILE_SPECIFIER="MyApp Distribution Profile"
+            -authenticationKeyPath ~/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8 \
+            -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" \
+            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Automatic
+          echo "✅ Archive created successfully at build/Action Demo.xcarchive"
+
+      # 6️⃣ Create ExportOptions.plist
+      - name: 📝 Create Export Options
+        run: |
+          cat > ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>app-store</string>
+              <key>teamID</key>
+              <string>${APPLE_TEAM_ID}</string>
+              <key>uploadSymbols</key>
+              <true/>
+              <key>uploadBitcode</key>
+              <false/>
+              <key>signingStyle</key>
+              <string>automatic</string>
+          </dict>
+          </plist>
+          EOF
+          echo "✅ ExportOptions.plist created"
+
+      # 7️⃣ Export IPA
+      - name: 📦 Export IPA
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath "$PWD/build/Action Demo.xcarchive" \
+            -exportPath "$PWD/build" \
+            -exportOptionsPlist ExportOptions.plist \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ~/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8 \
+            -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" \
+            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
+          echo "✅ IPA exported successfully"
+
+      # 8️⃣ Upload to App Store Connect
+      - name: 🚀 Upload to App Store Connect
+        run: |
+          xcrun altool --upload-app \
+            --type ios \
+            --file "$PWD/build/Action Demo.ipa" \
+            --apiKey "$APP_STORE_CONNECT_KEY_ID" \
+            --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID"
+          echo "✅ Successfully uploaded to App Store Connect"
